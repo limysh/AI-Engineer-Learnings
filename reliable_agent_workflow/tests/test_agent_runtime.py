@@ -97,9 +97,12 @@ class AgentRuntimeTests(unittest.TestCase):
         request = ToolRequest("risky", {}, "risk-key", requires_review=True)
 
         waiting = runtime.execute("run-review", request)
-        approved = runtime.execute("run-review", request, approved=True)
 
         self.assertEqual(RunStatus.NEEDS_REVIEW, waiting.status)
+        self.assertEqual(0, calls["count"])
+
+        approved = runtime.execute("run-review", request, approved=True)
+
         self.assertEqual(RunStatus.SUCCEEDED, approved.status)
         self.assertEqual(1, calls["count"])
 
