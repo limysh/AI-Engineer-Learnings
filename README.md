@@ -21,17 +21,19 @@ A compact Python runtime that explores production concerns around tool-using age
 
 The project is deliberately small. The goal is to make the control flow and tradeoffs easy to inspect rather than hide them behind a large framework.
 
-### 2. Semantic Travel Search
-A notebook exploring the retrieval side of a RAG-style system using OpenAI embeddings and MongoDB.
+### 2. Semantic Retrieval + Evaluation
+A provider-agnostic retrieval core focused on making RAG retrieval behavior measurable and testable:
 
-It covers:
+- cosine-similarity ranking
+- metadata filtering
+- vector validation and duplicate protection
+- top-k retrieval
+- Hit Rate@K and Mean Reciprocal Rank evaluation
+- unit tests that run without external APIs
 
-- embedding unstructured text
-- storing searchable records in MongoDB
-- the shape of a semantic retrieval workflow
-- how a retrieval component can become the grounding layer for a larger RAG system
+**Start here:** [semantic_search/README.md](semantic_search/README.md)
 
-**Notebook:** [Semantic_Travel_Search.ipynb](Semantic_Travel_Search.ipynb)
+The original OpenAI + MongoDB Colab notebook is retained as an earlier experiment. The tested implementation above is the current reference for retrieval behavior and evaluation.
 
 ## Engineering principles I am exploring
 
@@ -42,7 +44,7 @@ It covers:
 5. **Production AI is mostly systems engineering around the model.**
 
 ## Tech
-Python, OpenAI APIs, MongoDB, embeddings, agent/tool orchestration patterns, testing, reliability, and evaluation.
+Python, OpenAI APIs, MongoDB, embeddings, vector retrieval, agent/tool orchestration patterns, testing, reliability, and evaluation.
 
 ## About
 I am a senior software/AI engineer with a backend and distributed-systems background. I use this repository for small experiments that help me reason about production AI architecture, not as a dump of proprietary work.

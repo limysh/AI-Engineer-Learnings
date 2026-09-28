@@ -22,5 +22,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Run agent workflow tests
-        run: python -m unittest discover -s reliable_agent_workflow/tests -v
+      - name: Run Python tests
+        run: |
+          python -m unittest discover -s reliable_agent_workflow/tests -v
+          python -m unittest discover -s semantic_search/tests -v
