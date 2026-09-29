@@ -24,12 +24,12 @@ The project is deliberately small. The goal is to make the control flow and trad
 ### 2. Semantic Retrieval + Evaluation
 A provider-agnostic retrieval core focused on making RAG retrieval behavior measurable and testable:
 
-- cosine-similarity ranking
-- metadata filtering
-- vector validation and duplicate protection
-- top-k retrieval
+- cosine-similarity ranking and metadata filtering
+- text-to-vector indexing/query service
+- OpenAI-compatible embedding-provider boundary
+- response validation for batch embeddings
 - Hit Rate@K and Mean Reciprocal Rank evaluation
-- unit tests that run without external APIs
+- offline unit tests with no API dependency
 
 **Start here:** [semantic_search/README.md](semantic_search/README.md)
 
@@ -44,7 +44,7 @@ The original OpenAI + MongoDB Colab notebook is retained as an earlier experimen
 5. **Production AI is mostly systems engineering around the model.**
 
 ## Tech
-Python, OpenAI APIs, MongoDB, embeddings, vector retrieval, agent/tool orchestration patterns, testing, reliability, and evaluation.
+Python, OpenAI-compatible APIs, MongoDB, embeddings, vector retrieval, agent/tool orchestration patterns, testing, reliability, and evaluation.
 
 ## About
 I am a senior software/AI engineer with a backend and distributed-systems background. I use this repository for small experiments that help me reason about production AI architecture, not as a dump of proprietary work.
