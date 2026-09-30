@@ -23,6 +23,8 @@ cosine ranking
    |
 top-k context
    |
+   +----> privacy-aware trace (latency, filters, result IDs/scores)
+   |
    v
 offline evaluation (Hit Rate@K, MRR)
 ```
@@ -36,6 +38,8 @@ offline evaluation (Hit Rate@K, MRR)
 - top-k retrieval
 - text-to-vector service layer for indexing and querying
 - OpenAI-compatible embedding adapter with batch-response validation
+- privacy-aware structured search traces with embedding, retrieval, and total latency
+- result ID/score telemetry without storing raw query text
 - small golden-dataset evaluation using Hit Rate@K and Mean Reciprocal Rank
 - unit tests that use fakes rather than network calls
 
@@ -72,7 +76,9 @@ Retrieval quality should be measurable independently from generation quality. If
 4. ranking returned the relevant documents;
 5. the generator failed even though retrieval was good.
 
-The external model client is also isolated behind a small adapter. Tests can verify batching, response ordering, dimensions, and failure handling without spending tokens or depending on a live API.
+The external model client is isolated behind a small adapter. Tests can verify batching, response ordering, dimensions, and failure handling without spending tokens or depending on a live API.
+
+The search service also exposes an optional trace sink. Successful searches emit structured timing and retrieval metadata, but deliberately omit the raw query. In a real enterprise system, query text can contain customer or sensitive data, so observability should be useful without making logs an unnecessary second copy of user content.
 
 ## Production extensions
 
@@ -82,7 +88,7 @@ For a production RAG service I would add:
 - hybrid lexical + vector retrieval
 - reranking
 - chunk/document versioning
-- per-query tracing for retrieved IDs, scores, filters, model, and latency
+- trace correlation IDs and failure/error telemetry
 - a larger labelled golden dataset
 - Recall@K / Precision@K / nDCG where appropriate
 - retry/timeout/rate-limit policy around the embedding provider

@@ -75,6 +75,47 @@ class SemanticSearchServiceTests(unittest.TestCase):
 
         self.assertEqual(calls_before, len(self.provider.calls))
 
+    def test_search_emits_privacy_aware_latency_trace(self):
+        traces = []
+        times = iter([10.0, 10.125, 10.2])
+        service = SemanticSearchService(
+            self.provider,
+            trace_sink=traces.append,
+            clock=lambda: next(times),
+        )
+        service.index_documents(
+            [
+                SourceDocument(
+                    "banff",
+                    "Mountain hiking in Canada",
+                    {"country": "Canada"},
+                ),
+                SourceDocument(
+                    "tokyo",
+                    "Tokyo rail network",
+                    {"country": "Japan"},
+                ),
+            ]
+        )
+
+        service.search(
+            "alpine trails",
+            k=2,
+            metadata_filter={"country": "Canada"},
+        )
+
+        self.assertEqual(1, len(traces))
+        trace = traces[0]
+        self.assertEqual(len("alpine trails"), trace.query_length)
+        self.assertEqual(2, trace.k)
+        self.assertEqual({"country": "Canada"}, trace.metadata_filter)
+        self.assertEqual(("banff",), trace.returned_document_ids)
+        self.assertEqual(1, len(trace.returned_scores))
+        self.assertAlmostEqual(125.0, trace.embedding_latency_ms)
+        self.assertAlmostEqual(75.0, trace.retrieval_latency_ms)
+        self.assertAlmostEqual(200.0, trace.total_latency_ms)
+        self.assertFalse(hasattr(trace, "query"))
+
 
 if __name__ == "__main__":
     unittest.main()

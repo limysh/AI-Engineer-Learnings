@@ -28,6 +28,7 @@ A provider-agnostic retrieval core focused on making RAG retrieval behavior meas
 - text-to-vector indexing/query service
 - OpenAI-compatible embedding-provider boundary
 - response validation for batch embeddings
+- privacy-aware retrieval tracing with latency and result metadata
 - Hit Rate@K and Mean Reciprocal Rank evaluation
 - offline unit tests with no API dependency
 
