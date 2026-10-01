@@ -27,6 +27,9 @@ top-k context
    |
    v
 offline evaluation (Hit Rate@K, MRR)
+   |
+   v
+CI quality gate
 ```
 
 ## What is implemented
@@ -41,6 +44,7 @@ offline evaluation (Hit Rate@K, MRR)
 - privacy-aware structured search traces with embedding, retrieval, and total latency
 - result ID/score telemetry without storing raw query text
 - small golden-dataset evaluation using Hit Rate@K and Mean Reciprocal Rank
+- configurable retrieval quality floors with actionable failures
 - unit tests that use fakes rather than network calls
 
 ## Run it
@@ -50,9 +54,10 @@ From the repository root:
 ```bash
 python semantic_search/example.py
 python -m unittest discover -s semantic_search/tests -v
+python semantic_search/quality_gate.py
 ```
 
-The example and tests require no API keys and make no network calls.
+The example, tests, and quality gate require no API keys and make no network calls.
 
 For a live OpenAI embedding integration, install the OpenAI Python SDK, configure credentials using the SDK's normal environment configuration, and construct:
 
@@ -65,6 +70,12 @@ search = SemanticSearchService(provider)
 ```
 
 No secrets are stored in this repository.
+
+## Retrieval quality gate
+
+`golden_dataset.json` is a small, version-controlled evaluation fixture. It contains the corpus embeddings, labelled queries, metadata filters, `k`, and approved minimum scores. `quality_gate.py` rebuilds the index, evaluates every case, and exits non-zero when Hit Rate@K or Mean Reciprocal Rank drops below those floors.
+
+GitHub Actions runs the gate separately from unit tests so a pull request cannot silently change ranking, filtering, embeddings, or evaluation data and reduce the approved retrieval quality. Changes to the golden set or its thresholds should be reviewed as explicit quality decisions, not incidental test updates.
 
 ## Why this shape
 
@@ -89,10 +100,10 @@ For a production RAG service I would add:
 - reranking
 - chunk/document versioning
 - trace correlation IDs and failure/error telemetry
-- a larger labelled golden dataset
+- a larger labelled golden dataset built from representative traffic
 - Recall@K / Precision@K / nDCG where appropriate
 - retry/timeout/rate-limit policy around the embedding provider
-- regression gates before changing embedding models, chunking, or retrieval parameters
+- baseline-delta gates when embedding models, chunking, or retrieval parameters change
 
 ## Earlier notebook
 
