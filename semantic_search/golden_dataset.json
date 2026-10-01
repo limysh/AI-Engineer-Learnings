@@ -1,0 +1,45 @@
+{
+  "k": 2,
+  "thresholds": {
+    "min_hit_rate_at_k": 1.0,
+    "min_mean_reciprocal_rank": 1.0
+  },
+  "documents": [
+    {
+      "document_id": "banff",
+      "text": "Mountain hiking in Canada",
+      "embedding": [1.0, 0.0, 0.0],
+      "metadata": {"country": "Canada", "theme": "outdoors"}
+    },
+    {
+      "document_id": "tokyo",
+      "text": "Tokyo rail network",
+      "embedding": [0.0, 1.0, 0.0],
+      "metadata": {"country": "Japan", "theme": "transit"}
+    },
+    {
+      "document_id": "montreal",
+      "text": "Montreal food and cafes",
+      "embedding": [0.0, 0.0, 1.0],
+      "metadata": {"country": "Canada", "theme": "food"}
+    }
+  ],
+  "cases": [
+    {
+      "name": "Canadian alpine trails",
+      "query_embedding": [0.95, 0.05, 0.0],
+      "relevant_document_ids": ["banff"]
+    },
+    {
+      "name": "Urban public transport",
+      "query_embedding": [0.05, 0.95, 0.0],
+      "relevant_document_ids": ["tokyo"]
+    },
+    {
+      "name": "Canadian cafe culture",
+      "query_embedding": [0.0, 0.1, 0.9],
+      "relevant_document_ids": ["montreal"],
+      "metadata_filter": {"country": "Canada"}
+    }
+  ]
+}

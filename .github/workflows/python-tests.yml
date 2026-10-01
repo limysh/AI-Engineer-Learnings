@@ -26,3 +26,6 @@ jobs:
         run: |
           python -m unittest discover -s reliable_agent_workflow/tests -v
           python -m unittest discover -s semantic_search/tests -v
+
+      - name: Enforce retrieval quality floor
+        run: python semantic_search/quality_gate.py

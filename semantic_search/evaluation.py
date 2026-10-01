@@ -1,4 +1,4 @@
-"""Offline retrieval metrics for small RAG golden datasets."""
+"""Offline retrieval metrics and quality gates for RAG golden datasets."""
 
 from __future__ import annotations
 
@@ -21,6 +21,24 @@ class RetrievalMetrics:
     cases: int
     hit_rate_at_k: float
     mean_reciprocal_rank: float
+
+
+@dataclass(frozen=True)
+class RetrievalThresholds:
+    min_hit_rate_at_k: float
+    min_mean_reciprocal_rank: float
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("min_hit_rate_at_k", self.min_hit_rate_at_k),
+            ("min_mean_reciprocal_rank", self.min_mean_reciprocal_rank),
+        ):
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"{name} must be between 0 and 1")
+
+
+class RetrievalQualityError(AssertionError):
+    """Raised when retrieval metrics fall below an approved quality floor."""
 
 
 def evaluate_retrieval(
@@ -67,3 +85,26 @@ def evaluate_retrieval(
         hit_rate_at_k=hits / total,
         mean_reciprocal_rank=reciprocal_rank_total / total,
     )
+
+
+def assert_retrieval_quality(
+    metrics: RetrievalMetrics,
+    thresholds: RetrievalThresholds,
+) -> None:
+    """Fail with actionable details when an offline quality floor is missed."""
+    failures = []
+    checks = (
+        ("Hit Rate@K", metrics.hit_rate_at_k, thresholds.min_hit_rate_at_k),
+        (
+            "Mean Reciprocal Rank",
+            metrics.mean_reciprocal_rank,
+            thresholds.min_mean_reciprocal_rank,
+        ),
+    )
+
+    for name, actual, minimum in checks:
+        if actual < minimum:
+            failures.append(f"{name} {actual:.3f} is below required {minimum:.3f}")
+
+    if failures:
+        raise RetrievalQualityError("; ".join(failures))
