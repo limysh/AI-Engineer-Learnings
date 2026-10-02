@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from threading import Lock
 from typing import Any, Callable, Dict, List, Mapping, Optional
 import time
 
@@ -15,9 +16,16 @@ import time
 class RunStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
+    WAITING = "waiting"
     SUCCEEDED = "succeeded"
     NEEDS_REVIEW = "needs_review"
     FAILED = "failed"
+
+
+class ClaimStatus(str, Enum):
+    ACQUIRED = "acquired"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
 
 
 class TransientToolError(RuntimeError):
@@ -43,6 +51,12 @@ class RunEvent:
     attempt: int
 
 
+@dataclass(frozen=True)
+class IdempotencyClaim:
+    status: ClaimStatus
+    result: Any = None
+
+
 @dataclass
 class RunState:
     run_id: str
@@ -57,22 +71,42 @@ class RunState:
 
 
 class InMemoryStore:
-    """Demo store. A production implementation should be durable."""
+    """Thread-safe demo store. A production implementation should be durable."""
 
     def __init__(self) -> None:
         self.runs: Dict[str, RunState] = {}
         self.results_by_idempotency_key: Dict[str, Any] = {}
+        self._idempotency_keys_in_progress: set[str] = set()
+        self._lock = Lock()
 
     def run(self, run_id: str) -> RunState:
-        if run_id not in self.runs:
-            self.runs[run_id] = RunState(run_id=run_id)
-        return self.runs[run_id]
+        with self._lock:
+            if run_id not in self.runs:
+                self.runs[run_id] = RunState(run_id=run_id)
+            return self.runs[run_id]
 
-    def prior_result(self, key: str) -> Any:
-        return self.results_by_idempotency_key.get(key)
+    def claim_idempotency_key(self, key: str) -> IdempotencyClaim:
+        """Atomically reserve a side effect or return its current state."""
+        with self._lock:
+            if key in self.results_by_idempotency_key:
+                return IdempotencyClaim(
+                    ClaimStatus.COMPLETED,
+                    self.results_by_idempotency_key[key],
+                )
+            if key in self._idempotency_keys_in_progress:
+                return IdempotencyClaim(ClaimStatus.IN_PROGRESS)
 
-    def remember_result(self, key: str, result: Any) -> None:
-        self.results_by_idempotency_key[key] = result
+            self._idempotency_keys_in_progress.add(key)
+            return IdempotencyClaim(ClaimStatus.ACQUIRED)
+
+    def complete_idempotency_key(self, key: str, result: Any) -> None:
+        with self._lock:
+            self.results_by_idempotency_key[key] = result
+            self._idempotency_keys_in_progress.discard(key)
+
+    def release_idempotency_key(self, key: str) -> None:
+        with self._lock:
+            self._idempotency_keys_in_progress.discard(key)
 
 
 class AgentRuntime:
@@ -108,13 +142,6 @@ class AgentRuntime:
             state.record("review_required", "Tool execution requires human approval")
             return state
 
-        prior = self.store.prior_result(request.idempotency_key)
-        if prior is not None:
-            state.status = RunStatus.SUCCEEDED
-            state.result = prior
-            state.record("duplicate_suppressed", "Returned result for existing idempotency key")
-            return state
-
         tool = self.tools.get(request.tool_name)
         if tool is None:
             state.status = RunStatus.FAILED
@@ -122,41 +149,61 @@ class AgentRuntime:
             state.record("configuration_error", state.error)
             return state
 
-        state.status = RunStatus.RUNNING
-
-        while state.attempts < self.max_attempts:
-            state.attempts += 1
-            state.record("tool_attempt", request.tool_name)
-
-            try:
-                result = tool(request.payload)
-            except TransientToolError as exc:
-                state.error = str(exc)
-                state.record("transient_error", state.error)
-
-                if state.attempts >= self.max_attempts:
-                    state.status = RunStatus.NEEDS_REVIEW
-                    state.record("retry_budget_exhausted", "Escalating after repeated transient failures")
-                    return state
-
-                self.sleeper(self.backoff_seconds(state.attempts))
-                continue
-            except PermanentToolError as exc:
-                state.status = RunStatus.FAILED
-                state.error = str(exc)
-                state.record("permanent_error", state.error)
-                return state
-            except Exception as exc:  # unexpected bugs are not automatically retry-safe
-                state.status = RunStatus.FAILED
-                state.error = f"{type(exc).__name__}: {exc}"
-                state.record("unexpected_error", state.error)
-                return state
-
-            self.store.remember_result(request.idempotency_key, result)
+        claim = self.store.claim_idempotency_key(request.idempotency_key)
+        if claim.status == ClaimStatus.COMPLETED:
             state.status = RunStatus.SUCCEEDED
-            state.result = result
-            state.error = None
-            state.record("tool_succeeded", request.tool_name)
+            state.result = claim.result
+            state.record("duplicate_suppressed", "Returned result for completed idempotency key")
+            return state
+        if claim.status == ClaimStatus.IN_PROGRESS:
+            state.status = RunStatus.WAITING
+            state.record("duplicate_in_progress", "Another run owns this idempotency key")
             return state
 
-        raise AssertionError("unreachable")
+        state.status = RunStatus.RUNNING
+        claim_active = True
+
+        try:
+            while state.attempts < self.max_attempts:
+                state.attempts += 1
+                state.record("tool_attempt", request.tool_name)
+
+                try:
+                    result = tool(request.payload)
+                except TransientToolError as exc:
+                    state.error = str(exc)
+                    state.record("transient_error", state.error)
+
+                    if state.attempts >= self.max_attempts:
+                        state.status = RunStatus.NEEDS_REVIEW
+                        state.record(
+                            "retry_budget_exhausted",
+                            "Escalating after repeated transient failures",
+                        )
+                        return state
+
+                    self.sleeper(self.backoff_seconds(state.attempts))
+                    continue
+                except PermanentToolError as exc:
+                    state.status = RunStatus.FAILED
+                    state.error = str(exc)
+                    state.record("permanent_error", state.error)
+                    return state
+                except Exception as exc:  # unexpected bugs are not automatically retry-safe
+                    state.status = RunStatus.FAILED
+                    state.error = f"{type(exc).__name__}: {exc}"
+                    state.record("unexpected_error", state.error)
+                    return state
+
+                self.store.complete_idempotency_key(request.idempotency_key, result)
+                claim_active = False
+                state.status = RunStatus.SUCCEEDED
+                state.result = result
+                state.error = None
+                state.record("tool_succeeded", request.tool_name)
+                return state
+
+            raise AssertionError("unreachable")
+        finally:
+            if claim_active:
+                self.store.release_idempotency_key(request.idempotency_key)

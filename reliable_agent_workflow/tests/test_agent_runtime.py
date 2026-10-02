@@ -1,5 +1,6 @@
 import pathlib
 import sys
+import threading
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -85,6 +86,83 @@ class AgentRuntimeTests(unittest.TestCase):
         self.assertEqual(RunStatus.SUCCEEDED, second.status)
         self.assertEqual(1, calls["count"])
         self.assertIn("duplicate_suppressed", [event.kind for event in second.events])
+
+    def test_none_result_is_still_cached(self):
+        calls = {"count": 0}
+
+        def mutate(_):
+            calls["count"] += 1
+            return None
+
+        runtime = AgentRuntime({"mutate": mutate}, sleeper=lambda _: None)
+        request = ToolRequest("mutate", {}, "none-result")
+
+        first = runtime.execute("run-none-a", request)
+        second = runtime.execute("run-none-b", request)
+
+        self.assertEqual(RunStatus.SUCCEEDED, first.status)
+        self.assertEqual(RunStatus.SUCCEEDED, second.status)
+        self.assertIsNone(second.result)
+        self.assertEqual(1, calls["count"])
+        self.assertIn("duplicate_suppressed", [event.kind for event in second.events])
+
+    def test_concurrent_duplicate_waits_without_repeating_side_effect(self):
+        calls = {"count": 0}
+        tool_started = threading.Event()
+        allow_tool_to_finish = threading.Event()
+        completed_states = []
+
+        def slow_mutation(_):
+            calls["count"] += 1
+            tool_started.set()
+            if not allow_tool_to_finish.wait(timeout=2):
+                raise RuntimeError("test timed out waiting to release tool")
+            return {"created_id": 456}
+
+        runtime = AgentRuntime({"mutate": slow_mutation}, sleeper=lambda _: None)
+        request = ToolRequest("mutate", {}, "concurrent-operation")
+        owner = threading.Thread(
+            target=lambda: completed_states.append(runtime.execute("run-owner", request))
+        )
+
+        owner.start()
+        self.assertTrue(tool_started.wait(timeout=2))
+        duplicate = runtime.execute("run-duplicate", request)
+
+        self.assertEqual(RunStatus.WAITING, duplicate.status)
+        self.assertEqual(0, duplicate.attempts)
+        self.assertIn("duplicate_in_progress", [event.kind for event in duplicate.events])
+        self.assertEqual(1, calls["count"])
+
+        allow_tool_to_finish.set()
+        owner.join(timeout=2)
+        self.assertFalse(owner.is_alive())
+        self.assertEqual(RunStatus.SUCCEEDED, completed_states[0].status)
+
+        replay = runtime.execute("run-replay", request)
+        self.assertEqual(RunStatus.SUCCEEDED, replay.status)
+        self.assertEqual({"created_id": 456}, replay.result)
+        self.assertEqual(1, calls["count"])
+
+    def test_failed_execution_releases_idempotency_claim(self):
+        calls = {"count": 0}
+
+        def fail_once(_):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise PermanentToolError("invalid first attempt")
+            return "recovered"
+
+        runtime = AgentRuntime({"tool": fail_once}, sleeper=lambda _: None)
+        request = ToolRequest("tool", {}, "released-after-failure")
+
+        failed = runtime.execute("run-failed", request)
+        retried = runtime.execute("run-retried", request)
+
+        self.assertEqual(RunStatus.FAILED, failed.status)
+        self.assertEqual(RunStatus.SUCCEEDED, retried.status)
+        self.assertEqual("recovered", retried.result)
+        self.assertEqual(2, calls["count"])
 
     def test_high_risk_action_waits_for_approval(self):
         calls = {"count": 0}

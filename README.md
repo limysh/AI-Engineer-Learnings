@@ -11,11 +11,11 @@ A compact Python runtime that explores production concerns around tool-using age
 
 - explicit run state rather than a hidden agent loop
 - retries for transient failures
-- idempotency for duplicate requests
+- atomic idempotency claims for concurrent duplicate requests
 - permanent vs transient error classification
 - human-review fallback for risky or repeatedly failing actions
 - structured event history for debugging and observability
-- unit tests for the failure paths, not only the happy path
+- unit tests for concurrency and failure paths, not only the happy path
 
 **Start here:** [reliable_agent_workflow/README.md](reliable_agent_workflow/README.md)
 
@@ -30,6 +30,7 @@ A provider-agnostic retrieval core focused on making RAG retrieval behavior meas
 - response validation for batch embeddings
 - privacy-aware retrieval tracing with latency and result metadata
 - Hit Rate@K and Mean Reciprocal Rank evaluation
+- version-controlled golden dataset and CI quality gate
 - offline unit tests with no API dependency
 
 **Start here:** [semantic_search/README.md](semantic_search/README.md)
