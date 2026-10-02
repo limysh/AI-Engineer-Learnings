@@ -10,6 +10,7 @@ The interesting part of a production agent is rarely the single LLM call. Proble
 
 - a tool times out after performing the side effect;
 - a retry repeats the same action;
+- two workers receive the same request concurrently;
 - an upstream dependency has a transient outage;
 - a request is valid but high-risk and should wait for human approval;
 - an execution fails three times and needs a useful escalation trail;
@@ -26,7 +27,11 @@ Tool request
 Check human-review policy ----> Needs review
     |
     v
-Check idempotency cache ------> Return prior result
+Atomically claim idempotency key
+    |
+    +---- completed -----------> Return prior result
+    |
+    +---- already in progress -> Wait without executing
     |
     v
 Execute tool
@@ -35,20 +40,23 @@ Execute tool
     |
     +---- transient error -----> Retry with backoff
     |                              |
-    |                              +--> retries exhausted -> Needs review
+    |                              +--> retries exhausted -> Release claim + review
     |
-    +---- permanent error -----> Fail without retry
+    +---- permanent error -----> Release claim + fail
 ```
 
 ## What is implemented
 
 - `RunState` with explicit status and event history
 - `ToolRequest` with an idempotency key
+- atomic in-process idempotency claims for concurrent duplicate suppression
+- explicit waiting state when another run owns the same operation
+- correct caching of successful `None` results
+- claim release after failed execution so a later run can retry
 - transient and permanent tool exceptions
 - bounded retries with injectable backoff/sleep
-- in-memory result store for duplicate suppression
 - human-review gate
-- tests for retries, duplicate requests, permanent failures, and escalation
+- deterministic tests for retries, concurrent requests, duplicate results, failures, and escalation
 
 ## Run it
 
@@ -66,6 +74,7 @@ No third-party packages are required.
 This example intentionally stops before pretending to be a production framework. In a real distributed system I would replace or add:
 
 - durable run state in Postgres/DynamoDB/Redis rather than memory;
+- a database uniqueness constraint or conditional write for cross-worker idempotency;
 - a queue between scheduling and execution;
 - leases/heartbeats for long-running workers;
 - DLQ or explicit terminal-failure storage;

@@ -18,13 +18,21 @@ A production workflow should be inspectable. Each run therefore has:
 
 This is intentionally boring. Boring state is easier to debug than a conversational trace that has to be reverse-engineered after an incident.
 
-## 2. Idempotency before retries
+## 2. Idempotency before retries and concurrency
 
-Retries are dangerous around side effects.
+Retries and concurrent delivery are dangerous around side effects.
 
-If a payment, notification, ticket creation, or database mutation times out after the remote service completed it, a blind retry can duplicate the action. The runtime checks a caller-provided idempotency key before executing and stores the successful result against that key.
+If a payment, notification, ticket creation, or database mutation times out after the remote service completed it, a blind retry can duplicate the action. A check followed later by a write is not sufficient: two workers can both observe a missing result and execute simultaneously.
 
-In production, the idempotency record must be durable and ideally enforced as close to the side effect as possible.
+The in-memory store therefore provides an atomic claim operation with three outcomes:
+
+- **acquired**: this run owns the operation and may call the tool;
+- **in progress**: another run owns it, so this run waits without executing;
+- **completed**: return the stored result, including a legitimate `None` result.
+
+Failed executions release their claim. Successful executions atomically replace the claim with the stored result.
+
+The lock only protects threads in one Python process. A production implementation needs the same state transition in a durable shared store, typically using a unique constraint, transactional insert, or conditional write. The downstream service should also enforce the idempotency key whenever possible.
 
 ## 3. Transient vs permanent failures
 
@@ -62,7 +70,7 @@ The event history is intentionally structured rather than free-form logging. In 
 - human-review rate;
 - p50/p95/p99 run latency;
 - tool latency and availability;
-- duplicate suppression count.
+- duplicate suppression and duplicate-in-progress counts.
 
 ## 7. What I would add for distributed execution
 
