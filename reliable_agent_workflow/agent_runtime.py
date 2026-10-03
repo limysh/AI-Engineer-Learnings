@@ -55,6 +55,15 @@ class RunEvent:
 class IdempotencyClaim:
     status: ClaimStatus
     result: Any = None
+    lease_token: Optional[int] = None
+    reclaimed: bool = False
+
+
+@dataclass(frozen=True)
+class IdempotencyLease:
+    owner_id: str
+    token: int
+    expires_at: float
 
 
 @dataclass
@@ -73,10 +82,21 @@ class RunState:
 class InMemoryStore:
     """Thread-safe demo store. A production implementation should be durable."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        lease_seconds: float = 30.0,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be > 0")
+
         self.runs: Dict[str, RunState] = {}
         self.results_by_idempotency_key: Dict[str, Any] = {}
-        self._idempotency_keys_in_progress: set[str] = set()
+        self.lease_seconds = lease_seconds
+        self.clock = clock
+        self._leases_by_idempotency_key: Dict[str, IdempotencyLease] = {}
+        self._next_lease_token = 0
         self._lock = Lock()
 
     def run(self, run_id: str) -> RunState:
@@ -85,28 +105,73 @@ class InMemoryStore:
                 self.runs[run_id] = RunState(run_id=run_id)
             return self.runs[run_id]
 
-    def claim_idempotency_key(self, key: str) -> IdempotencyClaim:
-        """Atomically reserve a side effect or return its current state."""
+    def claim_idempotency_key(self, key: str, owner_id: str) -> IdempotencyClaim:
+        """Atomically acquire, recover, or inspect a side-effect lease."""
         with self._lock:
             if key in self.results_by_idempotency_key:
                 return IdempotencyClaim(
                     ClaimStatus.COMPLETED,
                     self.results_by_idempotency_key[key],
                 )
-            if key in self._idempotency_keys_in_progress:
+
+            now = self.clock()
+            existing_lease = self._leases_by_idempotency_key.get(key)
+            if existing_lease is not None and existing_lease.expires_at > now:
                 return IdempotencyClaim(ClaimStatus.IN_PROGRESS)
 
-            self._idempotency_keys_in_progress.add(key)
-            return IdempotencyClaim(ClaimStatus.ACQUIRED)
+            self._next_lease_token += 1
+            lease = IdempotencyLease(
+                owner_id=owner_id,
+                token=self._next_lease_token,
+                expires_at=now + self.lease_seconds,
+            )
+            self._leases_by_idempotency_key[key] = lease
+            return IdempotencyClaim(
+                ClaimStatus.ACQUIRED,
+                lease_token=lease.token,
+                reclaimed=existing_lease is not None,
+            )
 
-    def complete_idempotency_key(self, key: str, result: Any) -> None:
+    def renew_idempotency_key(self, key: str, lease_token: int) -> bool:
+        """Extend a lease only if the caller still owns the latest token."""
         with self._lock:
+            lease = self._leases_by_idempotency_key.get(key)
+            now = self.clock()
+            if (
+                lease is None
+                or lease.token != lease_token
+                or lease.expires_at <= now
+            ):
+                return False
+
+            self._leases_by_idempotency_key[key] = IdempotencyLease(
+                owner_id=lease.owner_id,
+                token=lease.token,
+                expires_at=now + self.lease_seconds,
+            )
+            return True
+
+    def complete_idempotency_key(
+        self,
+        key: str,
+        lease_token: int,
+        result: Any,
+    ) -> bool:
+        """Commit only when the fencing token still belongs to this caller."""
+        with self._lock:
+            lease = self._leases_by_idempotency_key.get(key)
+            if lease is None or lease.token != lease_token:
+                return False
+
             self.results_by_idempotency_key[key] = result
-            self._idempotency_keys_in_progress.discard(key)
+            del self._leases_by_idempotency_key[key]
+            return True
 
-    def release_idempotency_key(self, key: str) -> None:
+    def release_idempotency_key(self, key: str, lease_token: int) -> None:
         with self._lock:
-            self._idempotency_keys_in_progress.discard(key)
+            lease = self._leases_by_idempotency_key.get(key)
+            if lease is not None and lease.token == lease_token:
+                del self._leases_by_idempotency_key[key]
 
 
 class AgentRuntime:
@@ -149,7 +214,7 @@ class AgentRuntime:
             state.record("configuration_error", state.error)
             return state
 
-        claim = self.store.claim_idempotency_key(request.idempotency_key)
+        claim = self.store.claim_idempotency_key(request.idempotency_key, run_id)
         if claim.status == ClaimStatus.COMPLETED:
             state.status = RunStatus.SUCCEEDED
             state.result = claim.result
@@ -159,6 +224,12 @@ class AgentRuntime:
             state.status = RunStatus.WAITING
             state.record("duplicate_in_progress", "Another run owns this idempotency key")
             return state
+
+        if claim.lease_token is None:
+            raise AssertionError("acquired claim must include a lease token")
+        lease_token = claim.lease_token
+        if claim.reclaimed:
+            state.record("lease_reclaimed", "Recovered an expired idempotency lease")
 
         state.status = RunStatus.RUNNING
         claim_active = True
@@ -195,7 +266,17 @@ class AgentRuntime:
                     state.record("unexpected_error", state.error)
                     return state
 
-                self.store.complete_idempotency_key(request.idempotency_key, result)
+                committed = self.store.complete_idempotency_key(
+                    request.idempotency_key,
+                    lease_token,
+                    result,
+                )
+                if not committed:
+                    state.status = RunStatus.NEEDS_REVIEW
+                    state.error = "Idempotency lease was replaced before completion"
+                    state.record("lease_lost", state.error)
+                    return state
+
                 claim_active = False
                 state.status = RunStatus.SUCCEEDED
                 state.result = result
@@ -206,4 +287,7 @@ class AgentRuntime:
             raise AssertionError("unreachable")
         finally:
             if claim_active:
-                self.store.release_idempotency_key(request.idempotency_key)
+                self.store.release_idempotency_key(
+                    request.idempotency_key,
+                    lease_token,
+                )

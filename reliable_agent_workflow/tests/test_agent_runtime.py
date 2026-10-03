@@ -8,11 +8,24 @@ sys.path.insert(0, str(ROOT))
 
 from agent_runtime import (
     AgentRuntime,
+    ClaimStatus,
+    InMemoryStore,
     PermanentToolError,
     RunStatus,
     ToolRequest,
     TransientToolError,
 )
+
+
+class ManualClock:
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
 
 
 class AgentRuntimeTests(unittest.TestCase):
@@ -163,6 +176,88 @@ class AgentRuntimeTests(unittest.TestCase):
         self.assertEqual(RunStatus.SUCCEEDED, retried.status)
         self.assertEqual("recovered", retried.result)
         self.assertEqual(2, calls["count"])
+
+    def test_expired_lease_is_reclaimed_with_new_fencing_token(self):
+        clock = ManualClock()
+        store = InMemoryStore(lease_seconds=5, clock=clock)
+
+        abandoned = store.claim_idempotency_key("operation", "worker-a")
+        clock.advance(6)
+        recovered = store.claim_idempotency_key("operation", "worker-b")
+
+        self.assertEqual(ClaimStatus.ACQUIRED, abandoned.status)
+        self.assertEqual(ClaimStatus.ACQUIRED, recovered.status)
+        self.assertTrue(recovered.reclaimed)
+        self.assertGreater(recovered.lease_token, abandoned.lease_token)
+        self.assertFalse(
+            store.complete_idempotency_key(
+                "operation",
+                abandoned.lease_token,
+                "stale-result",
+            )
+        )
+        self.assertTrue(
+            store.complete_idempotency_key(
+                "operation",
+                recovered.lease_token,
+                "recovered-result",
+            )
+        )
+
+        completed = store.claim_idempotency_key("operation", "worker-c")
+        self.assertEqual(ClaimStatus.COMPLETED, completed.status)
+        self.assertEqual("recovered-result", completed.result)
+
+    def test_lease_renewal_keeps_other_workers_waiting(self):
+        clock = ManualClock()
+        store = InMemoryStore(lease_seconds=5, clock=clock)
+        claim = store.claim_idempotency_key("operation", "worker-a")
+
+        clock.advance(4)
+        self.assertTrue(store.renew_idempotency_key("operation", claim.lease_token))
+        clock.advance(2)
+        duplicate = store.claim_idempotency_key("operation", "worker-b")
+
+        self.assertEqual(ClaimStatus.IN_PROGRESS, duplicate.status)
+
+    def test_expired_lease_cannot_be_renewed(self):
+        clock = ManualClock()
+        store = InMemoryStore(lease_seconds=5, clock=clock)
+        claim = store.claim_idempotency_key("operation", "worker-a")
+
+        clock.advance(5)
+
+        self.assertFalse(store.renew_idempotency_key("operation", claim.lease_token))
+
+    def test_runtime_escalates_when_lease_is_lost_during_tool_call(self):
+        clock = ManualClock()
+        store = InMemoryStore(lease_seconds=5, clock=clock)
+        takeover = []
+
+        def slow_side_effect(_):
+            clock.advance(6)
+            takeover.append(store.claim_idempotency_key("operation", "recovery-worker"))
+            return "possibly-completed"
+
+        runtime = AgentRuntime(
+            {"mutate": slow_side_effect},
+            store=store,
+            sleeper=lambda _: None,
+        )
+        request = ToolRequest("mutate", {}, "operation")
+
+        state = runtime.execute("original-worker", request)
+
+        self.assertEqual(RunStatus.NEEDS_REVIEW, state.status)
+        self.assertIn("lease_lost", [event.kind for event in state.events])
+        self.assertEqual(ClaimStatus.ACQUIRED, takeover[0].status)
+        self.assertTrue(
+            store.complete_idempotency_key(
+                "operation",
+                takeover[0].lease_token,
+                "recovered-result",
+            )
+        )
 
     def test_high_risk_action_waits_for_approval(self):
         calls = {"count": 0}
