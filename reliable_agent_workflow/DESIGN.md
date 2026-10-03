@@ -24,15 +24,17 @@ Retries and concurrent delivery are dangerous around side effects.
 
 If a payment, notification, ticket creation, or database mutation times out after the remote service completed it, a blind retry can duplicate the action. A check followed later by a write is not sufficient: two workers can both observe a missing result and execute simultaneously.
 
-The in-memory store therefore provides an atomic claim operation with three outcomes:
+The in-memory store therefore provides an atomic lease operation with three outcomes:
 
 - **acquired**: this run owns the operation and may call the tool;
 - **in progress**: another run owns it, so this run waits without executing;
 - **completed**: return the stored result, including a legitimate `None` result.
 
-Failed executions release their claim. Successful executions atomically replace the claim with the stored result.
+Each lease expires and carries a monotonically increasing fencing token. If a worker crashes, a later worker can reclaim the expired lease with a newer token. The old worker cannot overwrite the recovered result if it eventually resumes: completion and release operations succeed only when their token still matches the latest lease. Long-running workers can explicitly renew a lease before it expires.
 
-The lock only protects threads in one Python process. A production implementation needs the same state transition in a durable shared store, typically using a unique constraint, transactional insert, or conditional write. The downstream service should also enforce the idempotency key whenever possible.
+Failed executions release their lease. Successful executions atomically replace the lease with the stored result. A runtime that loses ownership after performing a tool call escalates to human review because the external side effect may have occurred even though its local result could not be committed safely.
+
+The lock only protects threads in one Python process. A production implementation needs the same lease and fencing transition in a durable shared store, typically using a transaction or conditional write. Lease duration must exceed the expected heartbeat interval, and downstream services should also enforce the idempotency key whenever possible.
 
 ## 3. Transient vs permanent failures
 

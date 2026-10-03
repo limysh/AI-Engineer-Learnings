@@ -27,11 +27,13 @@ Tool request
 Check human-review policy ----> Needs review
     |
     v
-Atomically claim idempotency key
+Atomically claim expiring lease
     |
     +---- completed -----------> Return prior result
     |
     +---- already in progress -> Wait without executing
+    |
+    +---- expired -------------> Reclaim with newer fencing token
     |
     v
 Execute tool
@@ -49,7 +51,10 @@ Execute tool
 
 - `RunState` with explicit status and event history
 - `ToolRequest` with an idempotency key
-- atomic in-process idempotency claims for concurrent duplicate suppression
+- atomic in-process idempotency leases for concurrent duplicate suppression
+- lease expiry and recovery for operations abandoned by crashed workers
+- monotonically increasing fencing tokens that reject stale completions
+- explicit lease renewal for long-running work
 - explicit waiting state when another run owns the same operation
 - correct caching of successful `None` results
 - claim release after failed execution so a later run can retry
@@ -74,7 +79,8 @@ No third-party packages are required.
 This example intentionally stops before pretending to be a production framework. In a real distributed system I would replace or add:
 
 - durable run state in Postgres/DynamoDB/Redis rather than memory;
-- a database uniqueness constraint or conditional write for cross-worker idempotency;
+- transactional leases and fencing tokens in a shared database for cross-worker idempotency;
+- worker heartbeats that renew leases during long-running tool calls;
 - a queue between scheduling and execution;
 - leases/heartbeats for long-running workers;
 - DLQ or explicit terminal-failure storage;

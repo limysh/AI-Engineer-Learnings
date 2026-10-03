@@ -11,7 +11,7 @@ A compact Python runtime that explores production concerns around tool-using age
 
 - explicit run state rather than a hidden agent loop
 - retries for transient failures
-- atomic idempotency claims for concurrent duplicate requests
+- expiring idempotency leases and fencing tokens for concurrent agent workers
 - permanent vs transient error classification
 - human-review fallback for risky or repeatedly failing actions
 - structured event history for debugging and observability
