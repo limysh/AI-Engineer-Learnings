@@ -32,6 +32,8 @@ offline evaluation (Hit Rate@K, MRR)
 CI quality gate
 ```
 
+For hybrid retrieval, the same filtered corpus is ranked independently by cosine similarity and BM25, then combined with reciprocal-rank fusion (RRF). This lets exact product names, identifiers, and domain terms complement semantic similarity without making the two score scales directly comparable.
+
 ## What is implemented
 
 - deterministic cosine-similarity ranking
@@ -39,6 +41,8 @@ CI quality gate
 - duplicate document protection
 - metadata filtering before ranking
 - top-k retrieval
+- dependency-free BM25 lexical ranking
+- hybrid lexical + vector retrieval using reciprocal-rank fusion
 - text-to-vector service layer for indexing and querying
 - OpenAI-compatible embedding adapter with batch-response validation
 - privacy-aware structured search traces with embedding, retrieval, and total latency
@@ -77,6 +81,18 @@ No secrets are stored in this repository.
 
 GitHub Actions runs the gate separately from unit tests so a pull request cannot silently change ranking, filtering, embeddings, or evaluation data and reduce the approved retrieval quality. Changes to the golden set or its thresholds should be reviewed as explicit quality decisions, not incidental test updates.
 
+## Hybrid retrieval
+
+`hybrid.py` addresses a common vector-search weakness: exact terms can be missed when an embedding ranks a semantically nearby document higher. It computes BM25 and cosine rankings independently and combines their rank positions with RRF:
+
+```text
+query text --------> BM25 rank ---+
+                                  +--> RRF --> top-k
+query embedding --> cosine rank --+
+```
+
+RRF uses rank positions rather than raw scores, avoiding brittle normalization between BM25 and cosine similarity. Metadata filtering is applied before both rankings, and queries with no lexical overlap naturally fall back to vector order.
+
 ## Why this shape
 
 Retrieval quality should be measurable independently from generation quality. If an answer is poor, I want to be able to ask whether:
@@ -96,7 +112,6 @@ The search service also exposes an optional trace sink. Successful searches emit
 For a production RAG service I would add:
 
 - durable vector storage such as MongoDB Atlas, pgvector, or a managed vector database
-- hybrid lexical + vector retrieval
 - reranking
 - chunk/document versioning
 - trace correlation IDs and failure/error telemetry
