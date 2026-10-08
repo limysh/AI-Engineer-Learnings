@@ -29,3 +29,6 @@ jobs:
 
       - name: Enforce retrieval quality floor
         run: python semantic_search/quality_gate.py
+
+      - name: Compare hybrid retrieval against vector baseline
+        run: python semantic_search/hybrid_quality_gate.py

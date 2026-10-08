@@ -1,0 +1,111 @@
+{
+  "k": 1,
+  "thresholds": {
+    "min_hit_rate_at_k": 1,
+    "min_mean_reciprocal_rank": 1,
+    "min_rescued_cases": 1
+  },
+  "documents": [
+    {
+      "document_id": "rate-limit-runbook",
+      "text": "ERR429 rate limit retry policy",
+      "embedding": [
+        0.7,
+        0.3,
+        0
+      ],
+      "metadata": {
+        "team": "operations"
+      }
+    },
+    {
+      "document_id": "incident-guide",
+      "text": "General incident troubleshooting",
+      "embedding": [
+        1,
+        0,
+        0
+      ],
+      "metadata": {
+        "team": "operations"
+      }
+    },
+    {
+      "document_id": "leave-policy",
+      "text": "Annual leave policy",
+      "embedding": [
+        0,
+        1,
+        0
+      ],
+      "metadata": {
+        "team": "people"
+      }
+    },
+    {
+      "document_id": "hiking-guide",
+      "text": "Alpine hiking trail guide",
+      "embedding": [
+        0,
+        0,
+        1
+      ],
+      "metadata": {
+        "team": "travel"
+      }
+    }
+  ],
+  "cases": [
+    {
+      "name": "exact incident code rescued by BM25",
+      "query_text": "ERR429",
+      "query_embedding": [
+        1,
+        0,
+        0
+      ],
+      "relevant_document_ids": [
+        "rate-limit-runbook"
+      ]
+    },
+    {
+      "name": "semantic paraphrase without lexical overlap",
+      "query_text": "mountain walking paths",
+      "query_embedding": [
+        0,
+        0,
+        1
+      ],
+      "relevant_document_ids": [
+        "hiking-guide"
+      ]
+    },
+    {
+      "name": "filtered people policy",
+      "query_text": "leave policy",
+      "query_embedding": [
+        1,
+        0,
+        0
+      ],
+      "relevant_document_ids": [
+        "leave-policy"
+      ],
+      "metadata_filter": {
+        "team": "people"
+      }
+    },
+    {
+      "name": "aligned semantic and lexical ranking",
+      "query_text": "general incident",
+      "query_embedding": [
+        1,
+        0,
+        0
+      ],
+      "relevant_document_ids": [
+        "incident-guide"
+      ]
+    }
+  ]
+}
