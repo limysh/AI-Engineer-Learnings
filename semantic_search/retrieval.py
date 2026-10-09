@@ -8,7 +8,7 @@ without changing the ranking and evaluation logic.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from math import sqrt
+from math import isfinite, sqrt
 from typing import Any, Mapping, Sequence
 
 
@@ -37,6 +37,9 @@ def cosine_similarity(left: Vector, right: Vector) -> float:
     if not left:
         raise ValueError("vectors must not be empty")
 
+    if not all(isfinite(value) for value in (*left, *right)):
+        raise ValueError("vectors must contain finite values")
+
     dot = sum(a * b for a, b in zip(left, right))
     left_norm = sqrt(sum(value * value for value in left))
     right_norm = sqrt(sum(value * value for value in right))
@@ -63,30 +66,47 @@ class InMemoryVectorIndex:
         *,
         metadata: Mapping[str, Any] | None = None,
     ) -> None:
-        vector = tuple(float(value) for value in embedding)
-        if not document_id:
-            raise ValueError("document_id must not be empty")
-        if document_id in self._ids:
-            raise ValueError(f"duplicate document_id: {document_id}")
-        if not vector:
-            raise ValueError("embedding must not be empty")
-
-        if self._dimension is None:
-            self._dimension = len(vector)
-        elif len(vector) != self._dimension:
-            raise ValueError(
-                f"embedding dimension {len(vector)} does not match index dimension {self._dimension}"
-            )
-
-        self._documents.append(
-            Document(
-                document_id=document_id,
-                text=text,
-                embedding=vector,
-                metadata=dict(metadata or {}),
-            )
+        self.add_many(
+            [Document(document_id, text, tuple(embedding), dict(metadata or {}))]
         )
-        self._ids.add(document_id)
+
+    def add_many(self, documents: Sequence[Document]) -> None:
+        """Validate a batch before committing any documents to the index."""
+        staged: list[Document] = []
+        seen_ids = set(self._ids)
+        dimension = self._dimension
+
+        for document in documents:
+            vector = tuple(float(value) for value in document.embedding)
+            if not document.document_id:
+                raise ValueError("document_id must not be empty")
+            if document.document_id in seen_ids:
+                raise ValueError(f"duplicate document_id: {document.document_id}")
+            if not vector:
+                raise ValueError("embedding must not be empty")
+            if not all(isfinite(value) for value in vector):
+                raise ValueError("embedding must contain finite values")
+
+            if dimension is None:
+                dimension = len(vector)
+            elif len(vector) != dimension:
+                raise ValueError(
+                    f"embedding dimension {len(vector)} does not match index dimension {dimension}"
+                )
+
+            staged.append(
+                Document(
+                    document_id=document.document_id,
+                    text=document.text,
+                    embedding=vector,
+                    metadata=dict(document.metadata),
+                )
+            )
+            seen_ids.add(document.document_id)
+
+        self._documents.extend(staged)
+        self._ids = seen_ids
+        self._dimension = dimension
 
     def search(
         self,
@@ -105,6 +125,9 @@ class InMemoryVectorIndex:
             raise ValueError(
                 f"query dimension {len(query)} does not match index dimension {self._dimension}"
             )
+
+        if not all(isfinite(value) for value in query):
+            raise ValueError("query embedding must contain finite values")
 
         filters = dict(metadata_filter or {})
         candidates = [

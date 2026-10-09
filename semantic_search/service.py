@@ -7,7 +7,7 @@ from time import perf_counter
 from typing import Any, Callable, Mapping
 
 from embeddings import EmbeddingProvider
-from retrieval import InMemoryVectorIndex, SearchResult
+from retrieval import Document, InMemoryVectorIndex, SearchResult
 
 
 @dataclass(frozen=True)
@@ -53,13 +53,12 @@ class SemanticSearchService:
         if len(embeddings) != len(documents):
             raise RuntimeError("embedding provider returned the wrong number of vectors")
 
-        for document, embedding in zip(documents, embeddings):
-            self.index.add(
-                document.document_id,
-                document.text,
-                embedding,
-                metadata=document.metadata,
-            )
+        self.index.add_many(
+            [
+                Document(document.document_id, document.text, tuple(embedding), document.metadata)
+                for document, embedding in zip(documents, embeddings)
+            ]
+        )
 
     def search(
         self,
