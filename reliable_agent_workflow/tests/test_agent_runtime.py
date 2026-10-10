@@ -208,6 +208,47 @@ class AgentRuntimeTests(unittest.TestCase):
         self.assertEqual(ClaimStatus.COMPLETED, completed.status)
         self.assertEqual("recovered-result", completed.result)
 
+    def test_expired_lease_cannot_complete_before_reclamation(self):
+        clock = ManualClock()
+        store = InMemoryStore(lease_seconds=5, clock=clock)
+        expired = store.claim_idempotency_key("operation", "worker-a")
+
+        clock.advance(5)
+        self.assertFalse(
+            store.complete_idempotency_key("operation", expired.lease_token, "stale")
+        )
+        self.assertNotIn("operation", store.results_by_idempotency_key)
+
+        recovered = store.claim_idempotency_key("operation", "worker-b")
+        self.assertTrue(recovered.reclaimed)
+        self.assertGreater(recovered.lease_token, expired.lease_token)
+        self.assertTrue(
+            store.complete_idempotency_key("operation", recovered.lease_token, "fresh")
+        )
+        replay = store.claim_idempotency_key("operation", "worker-c")
+        self.assertEqual(ClaimStatus.COMPLETED, replay.status)
+        self.assertEqual("fresh", replay.result)
+
+    def test_runtime_escalates_if_tool_outlives_lease_without_takeover(self):
+        clock = ManualClock()
+        store = InMemoryStore(lease_seconds=5, clock=clock)
+        calls = {"count": 0}
+
+        def slow_tool(_):
+            calls["count"] += 1
+            clock.advance(6)
+            return "remote-side-effect-may-have-occurred"
+
+        runtime = AgentRuntime({"mutate": slow_tool}, store=store, sleeper=lambda _: None)
+        request = ToolRequest("mutate", {}, "expired-operation")
+
+        state = runtime.execute("slow-worker", request)
+
+        self.assertEqual(RunStatus.NEEDS_REVIEW, state.status)
+        self.assertIn("lease_lost", [event.kind for event in state.events])
+        self.assertNotIn("expired-operation", store.results_by_idempotency_key)
+        self.assertEqual(1, calls["count"])
+
     def test_lease_renewal_keeps_other_workers_waiting(self):
         clock = ManualClock()
         store = InMemoryStore(lease_seconds=5, clock=clock)

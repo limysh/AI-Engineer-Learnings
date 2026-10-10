@@ -160,7 +160,11 @@ class InMemoryStore:
         """Commit only when the fencing token still belongs to this caller."""
         with self._lock:
             lease = self._leases_by_idempotency_key.get(key)
-            if lease is None or lease.token != lease_token:
+            if (
+                lease is None
+                or lease.token != lease_token
+                or lease.expires_at <= self.clock()
+            ):
                 return False
 
             self.results_by_idempotency_key[key] = result
