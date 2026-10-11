@@ -367,6 +367,30 @@ class AgentRuntimeTests(unittest.TestCase):
         self.assertEqual(RunStatus.SUCCEEDED, valid.status)
         self.assertEqual([1], calls)
 
+    def test_non_string_nested_json_keys_are_rejected(self):
+        calls = []
+        runtime = AgentRuntime(
+            {"tool": lambda _: calls.append(1) or "ok"}, sleeper=lambda _: None
+        )
+        invalid = ToolRequest("tool", {"nested": [{1: "value"}]}, "key")
+
+        state = runtime.execute("invalid", invalid)
+
+        self.assertEqual(RunStatus.FAILED, state.status)
+        self.assertIn("invalid_request", [event.kind for event in state.events])
+        self.assertEqual([], calls)
+
+    def test_non_finite_float_is_rejected(self):
+        calls = []
+        runtime = AgentRuntime(
+            {"tool": lambda _: calls.append(1) or "ok"}, sleeper=lambda _: None
+        )
+
+        state = runtime.execute("invalid", ToolRequest("tool", {"v": float("nan")}, "key"))
+
+        self.assertEqual(RunStatus.FAILED, state.status)
+        self.assertEqual([], calls)
+
     def test_store_rejects_conflict_after_lease_expires(self):
         clock = ManualClock()
         store = InMemoryStore(lease_seconds=5, clock=clock)

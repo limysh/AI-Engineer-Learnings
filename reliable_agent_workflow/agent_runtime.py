@@ -187,9 +187,22 @@ class InMemoryStore:
                 del self._leases_by_idempotency_key[key]
 
 
+def _require_string_keys(value: Any) -> None:
+    """Reject non-JSON object keys to avoid fingerprint collisions."""
+    if isinstance(value, Mapping):
+        if any(not isinstance(key, str) for key in value):
+            raise ValueError("JSON object keys must be strings")
+        for nested in value.values():
+            _require_string_keys(nested)
+    elif isinstance(value, (list, tuple)):
+        for nested in value:
+            _require_string_keys(nested)
+
+
 def _request_fingerprint(request: ToolRequest) -> str:
     """Hash canonical tool arguments without retaining sensitive payloads."""
     try:
+        _require_string_keys(request.payload)
         canonical = json.dumps(
             {"tool_name": request.tool_name, "payload": request.payload},
             sort_keys=True,
