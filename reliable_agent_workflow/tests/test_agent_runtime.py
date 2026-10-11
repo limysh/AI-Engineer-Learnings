@@ -181,9 +181,9 @@ class AgentRuntimeTests(unittest.TestCase):
         clock = ManualClock()
         store = InMemoryStore(lease_seconds=5, clock=clock)
 
-        abandoned = store.claim_idempotency_key("operation", "worker-a")
+        abandoned = store.claim_idempotency_key("operation", "worker-a", "operation-fingerprint")
         clock.advance(6)
-        recovered = store.claim_idempotency_key("operation", "worker-b")
+        recovered = store.claim_idempotency_key("operation", "worker-b", "operation-fingerprint")
 
         self.assertEqual(ClaimStatus.ACQUIRED, abandoned.status)
         self.assertEqual(ClaimStatus.ACQUIRED, recovered.status)
@@ -204,26 +204,26 @@ class AgentRuntimeTests(unittest.TestCase):
             )
         )
 
-        completed = store.claim_idempotency_key("operation", "worker-c")
+        completed = store.claim_idempotency_key("operation", "worker-c", "operation-fingerprint")
         self.assertEqual(ClaimStatus.COMPLETED, completed.status)
         self.assertEqual("recovered-result", completed.result)
 
     def test_lease_renewal_keeps_other_workers_waiting(self):
         clock = ManualClock()
         store = InMemoryStore(lease_seconds=5, clock=clock)
-        claim = store.claim_idempotency_key("operation", "worker-a")
+        claim = store.claim_idempotency_key("operation", "worker-a", "operation-fingerprint")
 
         clock.advance(4)
         self.assertTrue(store.renew_idempotency_key("operation", claim.lease_token))
         clock.advance(2)
-        duplicate = store.claim_idempotency_key("operation", "worker-b")
+        duplicate = store.claim_idempotency_key("operation", "worker-b", "operation-fingerprint")
 
         self.assertEqual(ClaimStatus.IN_PROGRESS, duplicate.status)
 
     def test_expired_lease_cannot_be_renewed(self):
         clock = ManualClock()
         store = InMemoryStore(lease_seconds=5, clock=clock)
-        claim = store.claim_idempotency_key("operation", "worker-a")
+        claim = store.claim_idempotency_key("operation", "worker-a", "operation-fingerprint")
 
         clock.advance(5)
 
@@ -236,7 +236,7 @@ class AgentRuntimeTests(unittest.TestCase):
 
         def slow_side_effect(_):
             clock.advance(6)
-            takeover.append(store.claim_idempotency_key("operation", "recovery-worker"))
+            takeover.append(store.claim_idempotency_key("operation", "recovery-worker", "operation-fingerprint"))
             return "possibly-completed"
 
         runtime = AgentRuntime(
@@ -258,6 +258,127 @@ class AgentRuntimeTests(unittest.TestCase):
                 "recovered-result",
             )
         )
+
+    def test_completed_key_rejects_different_payload(self):
+        calls = []
+
+        def mutate(payload):
+            calls.append(dict(payload))
+            return "result"
+
+        runtime = AgentRuntime({"mutate": mutate}, sleeper=lambda _: None)
+        first = runtime.execute("run-original", ToolRequest("mutate", {"amount": 1}, "shared"))
+        conflict = runtime.execute("run-conflict", ToolRequest("mutate", {"amount": 2}, "shared"))
+
+        self.assertEqual(RunStatus.SUCCEEDED, first.status)
+        self.assertEqual(RunStatus.FAILED, conflict.status)
+        self.assertIn("idempotency_conflict", [event.kind for event in conflict.events])
+        self.assertIsNone(conflict.result)
+        self.assertEqual([{"amount": 1}], calls)
+
+    def test_key_cannot_be_reused_for_another_tool(self):
+        calls = []
+        runtime = AgentRuntime(
+            {"create": lambda _: calls.append("create") or "created",
+             "delete": lambda _: calls.append("delete") or "deleted"},
+            sleeper=lambda _: None,
+        )
+
+        first = runtime.execute("run-create", ToolRequest("create", {}, "shared"))
+        conflict = runtime.execute("run-delete", ToolRequest("delete", {}, "shared"))
+
+        self.assertEqual(RunStatus.SUCCEEDED, first.status)
+        self.assertEqual(RunStatus.FAILED, conflict.status)
+        self.assertEqual(["create"], calls)
+
+    def test_same_json_payload_in_different_key_order_is_duplicate(self):
+        calls = []
+        runtime = AgentRuntime(
+            {"tool": lambda payload: calls.append(1) or "ok"}, sleeper=lambda _: None
+        )
+        first = ToolRequest("tool", {"nested": {"b": 2, "a": 1}, "value": 3}, "key")
+        reordered = ToolRequest("tool", {"value": 3, "nested": {"a": 1, "b": 2}}, "key")
+
+        self.assertEqual(RunStatus.SUCCEEDED, runtime.execute("first", first).status)
+        replay = runtime.execute("replay", reordered)
+
+        self.assertEqual(RunStatus.SUCCEEDED, replay.status)
+        self.assertEqual("ok", replay.result)
+        self.assertEqual([1], calls)
+
+    def test_in_progress_key_rejects_different_payload(self):
+        started = threading.Event()
+        release = threading.Event()
+        calls = []
+        states = []
+
+        def slow_tool(payload):
+            calls.append(dict(payload))
+            started.set()
+            if not release.wait(timeout=2):
+                raise RuntimeError("timed out")
+            return "ok"
+
+        runtime = AgentRuntime({"tool": slow_tool}, sleeper=lambda _: None)
+        worker = threading.Thread(
+            target=lambda: states.append(
+                runtime.execute("owner", ToolRequest("tool", {"v": 1}, "shared"))
+            )
+        )
+        worker.start()
+        try:
+            self.assertTrue(started.wait(timeout=2))
+            conflict = runtime.execute("other", ToolRequest("tool", {"v": 2}, "shared"))
+            self.assertEqual(RunStatus.FAILED, conflict.status)
+            self.assertIn("idempotency_conflict", [e.kind for e in conflict.events])
+            self.assertEqual([{"v": 1}], calls)
+        finally:
+            release.set()
+            worker.join(timeout=2)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(RunStatus.SUCCEEDED, states[0].status)
+
+    def test_failed_operation_keeps_request_binding(self):
+        calls = []
+
+        def fail(payload):
+            calls.append(dict(payload))
+            raise PermanentToolError("rejected")
+
+        runtime = AgentRuntime({"tool": fail}, sleeper=lambda _: None)
+        first = runtime.execute("first", ToolRequest("tool", {"v": 1}, "shared"))
+        conflict = runtime.execute("other", ToolRequest("tool", {"v": 2}, "shared"))
+
+        self.assertEqual(RunStatus.FAILED, first.status)
+        self.assertEqual(RunStatus.FAILED, conflict.status)
+        self.assertEqual([{"v": 1}], calls)
+
+    def test_invalid_payload_is_rejected_before_key_is_bound(self):
+        calls = []
+        runtime = AgentRuntime(
+            {"tool": lambda payload: calls.append(1) or "ok"}, sleeper=lambda _: None
+        )
+        invalid = runtime.execute("invalid", ToolRequest("tool", {"x": object()}, "key"))
+        valid = runtime.execute("valid", ToolRequest("tool", {"x": 1}, "key"))
+
+        self.assertEqual(RunStatus.FAILED, invalid.status)
+        self.assertIn("invalid_request", [e.kind for e in invalid.events])
+        self.assertEqual(RunStatus.SUCCEEDED, valid.status)
+        self.assertEqual([1], calls)
+
+    def test_store_rejects_conflict_after_lease_expires(self):
+        clock = ManualClock()
+        store = InMemoryStore(lease_seconds=5, clock=clock)
+        original = store.claim_idempotency_key("key", "worker-a", "fingerprint-a")
+        clock.advance(6)
+        conflict = store.claim_idempotency_key("key", "worker-b", "fingerprint-b")
+        recovered = store.claim_idempotency_key("key", "worker-b", "fingerprint-a")
+
+        self.assertEqual(ClaimStatus.ACQUIRED, original.status)
+        self.assertEqual(ClaimStatus.CONFLICT, conflict.status)
+        self.assertEqual(ClaimStatus.ACQUIRED, recovered.status)
+        self.assertTrue(recovered.reclaimed)
 
     def test_high_risk_action_waits_for_approval(self):
         calls = {"count": 0}

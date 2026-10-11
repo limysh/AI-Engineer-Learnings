@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+import hashlib
+import json
 from threading import Lock
 from typing import Any, Callable, Dict, List, Mapping, Optional
 import time
@@ -26,6 +28,7 @@ class ClaimStatus(str, Enum):
     ACQUIRED = "acquired"
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
+    CONFLICT = "conflict"
 
 
 class TransientToolError(RuntimeError):
@@ -93,6 +96,7 @@ class InMemoryStore:
 
         self.runs: Dict[str, RunState] = {}
         self.results_by_idempotency_key: Dict[str, Any] = {}
+        self._fingerprints_by_idempotency_key: Dict[str, str] = {}
         self.lease_seconds = lease_seconds
         self.clock = clock
         self._leases_by_idempotency_key: Dict[str, IdempotencyLease] = {}
@@ -105,9 +109,18 @@ class InMemoryStore:
                 self.runs[run_id] = RunState(run_id=run_id)
             return self.runs[run_id]
 
-    def claim_idempotency_key(self, key: str, owner_id: str) -> IdempotencyClaim:
-        """Atomically acquire, recover, or inspect a side-effect lease."""
+    def claim_idempotency_key(
+        self, key: str, owner_id: str, fingerprint: str
+    ) -> IdempotencyClaim:
+        """Atomically bind a request to its key, then acquire or inspect its lease."""
+        if not fingerprint:
+            raise ValueError("fingerprint must not be empty")
         with self._lock:
+            bound = self._fingerprints_by_idempotency_key.get(key)
+            if bound is not None and bound != fingerprint:
+                return IdempotencyClaim(ClaimStatus.CONFLICT)
+            self._fingerprints_by_idempotency_key.setdefault(key, fingerprint)
+
             if key in self.results_by_idempotency_key:
                 return IdempotencyClaim(
                     ClaimStatus.COMPLETED,
@@ -174,6 +187,20 @@ class InMemoryStore:
                 del self._leases_by_idempotency_key[key]
 
 
+def _request_fingerprint(request: ToolRequest) -> str:
+    """Hash canonical tool arguments without retaining sensitive payloads."""
+    try:
+        canonical = json.dumps(
+            {"tool_name": request.tool_name, "payload": request.payload},
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Tool request must be JSON-serializable") from exc
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 class AgentRuntime:
     def __init__(
         self,
@@ -214,7 +241,22 @@ class AgentRuntime:
             state.record("configuration_error", state.error)
             return state
 
-        claim = self.store.claim_idempotency_key(request.idempotency_key, run_id)
+        try:
+            fingerprint = _request_fingerprint(request)
+        except ValueError:
+            state.status = RunStatus.FAILED
+            state.error = "Tool request must be JSON-serializable"
+            state.record("invalid_request", state.error)
+            return state
+
+        claim = self.store.claim_idempotency_key(
+            request.idempotency_key, run_id, fingerprint
+        )
+        if claim.status == ClaimStatus.CONFLICT:
+            state.status = RunStatus.FAILED
+            state.error = "Idempotency key is bound to a different tool request"
+            state.record("idempotency_conflict", state.error)
+            return state
         if claim.status == ClaimStatus.COMPLETED:
             state.status = RunStatus.SUCCEEDED
             state.result = claim.result
